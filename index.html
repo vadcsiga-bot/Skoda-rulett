@@ -42,9 +42,7 @@
   }
   #frame{
     position:relative;
-    width:100%; height:100%;
-    max-width:calc(100vh * 16 / 9);
-    max-height:calc(100vw * 9 / 16);
+    width:100vw; height:100vh; height:100dvh;
     background:var(--bg-deep);
     overflow:hidden;
   }
@@ -215,11 +213,22 @@
 "use strict";
 
 // ---------- Alapbeállítások ----------
-const W = 320, H = 180;
+const H = 180; // rögzített függőleges "world" magasság - ez adja a pixelméretet
+let W = 320;   // a szélesség a képernyő arányához igazodik, lásd resizeCanvas()
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
-canvas.width = W; canvas.height = H;
-ctx.imageSmoothingEnabled = false;
+
+function resizeCanvas(){
+  const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+  W = Math.round(H * aspect);
+  W = Math.max(200, Math.min(560, W)); // ne legyen extrém keskeny/széles a világ
+  canvas.width = W;
+  canvas.height = H;
+  ctx.imageSmoothingEnabled = false;
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+window.addEventListener('orientationchange', resizeCanvas);
 
 const TRACK_LENGTH = 3600;
 const HELPER_X = TRACK_LENGTH * 0.45;
