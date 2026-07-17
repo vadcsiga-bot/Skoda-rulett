@@ -107,6 +107,25 @@
     color:var(--paper);
     line-height:1.8;
   }
+  #hudSpeedBox{ line-height:1.6; }
+  #speedBarBg{
+    position:relative;
+    width:70px; height:7px;
+    margin-top:4px;
+    background:rgba(0,0,0,.4);
+    border:1px solid rgba(255,255,255,.2);
+  }
+  #speedBarFill{
+    height:100%; width:0%;
+    background:var(--mustard);
+  }
+  #speedThreshold{
+    position:absolute; top:-2px; bottom:-2px; left:0%;
+    width:2px;
+    background:var(--corolla-blue);
+    opacity:0;
+    transition:opacity .25s ease;
+  }
   #progressWrap{
     position:absolute; top:0; left:0; right:0;
     height:5px;
@@ -180,6 +199,13 @@
     <div id="progressWrap"><div id="progressBar"></div></div>
     <div id="hud">
       <div class="hud-box" id="hudTime">IDŐ: 0.0s</div>
+      <div class="hud-box" id="hudSpeedBox">
+        SEBESSÉG
+        <div id="speedBarBg">
+          <div id="speedBarFill"></div>
+          <div id="speedThreshold"></div>
+        </div>
+      </div>
       <div class="hud-box" id="hudHits">ÜTKÖZÉS: 0</div>
     </div>
     <div id="caption"></div>
@@ -188,7 +214,7 @@
       <h1 class="title">SKODA<br>ROULETTE</h1>
       <div class="subtitle">
         A haverod Skodája megint lerobbant. Told a szerelőig a Corolladdal,
-        mielőtt örökre leáll!<br><br>
+        mielőtt ő is örökre leáll!<br><br>
         TARTSD NYOMVA a gombot a gyorsításhoz. ENGEDD EL a lejtőkön,
         nehogy elszabaduljon a kocsi.
       </div>
@@ -204,7 +230,7 @@
       <button class="btn" id="restartBtn">ÚJRA</button>
     </div>
 
-    <button id="pushBtn">TOLD MEG!</button>
+    <button id="pushBtn">TOLÁS</button>
   </div>
 </div>
 
@@ -249,15 +275,21 @@ const OBSTACLES_DEF = [
   {x:420, type:'pothole'},
   {x:660, type:'rock'},
   {x:940, type:'pothole'},
-  {x:1180, type:'animal'},
   {x:1420, type:'rock'},
   {x:1900, type:'pothole'},
   {x:2140, type:'rock'},
-  {x:2380, type:'animal'},
-  {x:2640, type:'pothole'},
+  {x:2760, type:'animal'},
   {x:2920, type:'rock'},
   {x:3180, type:'pothole'},
 ];
+
+// Zóna-alapú akadályok: ugratás (kell a sebesség) és borulásveszély (nem szabad nyomni)
+const ZONES_DEF = [
+  {id:'jump1', type:'jump', xStart:1080, xEnd:1128, warnX:900, minSpeed:78},
+  {id:'tip1',  type:'tip',  xStart:2440, xEnd:2560, warnX:2280, tolerance:0.35},
+];
+const JUMP_STUN = 1.2;
+const TIP_STUN = 1.3;
 
 // ---------- Állapot ----------
 let phase = 'ready'; // ready | playing | helper_cutscene | finish_cutscene | finished
@@ -271,7 +303,10 @@ let cutsceneT = 0;
 let shakeT = 0;
 let finalTime = 0;
 let obstacles = [];
+let zones = [];
 let dustParticles = [];
+let stunT = 0;       // >0 amíg a kocsi kábult (borulás/beragadás) - fizika szünetel
+let stunKind = null; // 'tip' | 'pit'
 
 const PUSH_ACCEL_BASE = 58;
 const PUSH_ACCEL_HELPED = 92;
@@ -290,7 +325,10 @@ function resetGame(){
   cutsceneT = 0;
   shakeT = 0;
   obstacles = OBSTACLES_DEF.map(o => ({...o, hit:false}));
+  zones = ZONES_DEF.map(z => ({...z, warned:false, resolved:false, holdTime:0, animT:0}));
   dustParticles = [];
+  stunT = 0;
+  stunKind = null;
 }
 resetGame();
 
@@ -400,6 +438,8 @@ const progressWrap = document.getElementById('progressWrap');
 const progressBar = document.getElementById('progressBar');
 const hudTime = document.getElementById('hudTime');
 const hudHits = document.getElementById('hudHits');
+const speedBarFill = document.getElementById('speedBarFill');
+const speedThreshold = document.getElementById('speedThreshold');
 const captionEl = document.getElementById('caption');
 
 let captionTimer = null;
@@ -442,50 +482,116 @@ let lastT = performance.now();
 function update(dt){
   if (phase === 'playing'){
     elapsed += dt;
-    const slope = slopeAt(worldX);
-    const gravityAccel = slope * GRAVITY_K;
-    const pushAccel = helperJoined ? PUSH_ACCEL_HELPED : PUSH_ACCEL_BASE;
 
-    let accel = gravityAccel;
-    if (isHolding) accel += pushAccel;
-    else accel -= FRICTION_DECEL;
+    if (stunT > 0){
+      stunT = Math.max(0, stunT - dt);
+      if (stunT === 0) stunKind = null;
+    } else {
+      const slope = slopeAt(worldX);
+      const gravityAccel = slope * GRAVITY_K;
+      const pushAccel = helperJoined ? PUSH_ACCEL_HELPED : PUSH_ACCEL_BASE;
 
-    velocity += accel * dt;
-    velocity = Math.max(0, Math.min(MAX_SPEED, velocity));
-    worldX += velocity * dt;
+      let accel = gravityAccel;
+      if (isHolding) accel += pushAccel;
+      else accel -= FRICTION_DECEL;
 
-    if (velocity > 8 && Math.random() < 0.5){
-      dustParticles.push({x:worldX-6, y:groundY(worldX)+2, life:0.4, vx:-20-Math.random()*20});
-    }
+      velocity += accel * dt;
+      velocity = Math.max(0, Math.min(MAX_SPEED, velocity));
+      worldX += velocity * dt;
 
-    if (!helperJoined && worldX >= HELPER_X){
-      phase = 'helper_cutscene';
-      cutsceneT = 0;
-      velocity = 0;
-    }
-
-    for (const o of obstacles){
-      if (!o.hit && Math.abs(worldX - o.x) < 13){
-        o.hit = true;
-        hitCount++;
-        velocity *= 0.45;
-        shakeT = 0.25;
-        playHit();
-        hudHits.textContent = 'ÜTKÖZÉS: ' + hitCount;
+      if (velocity > 8 && Math.random() < 0.5){
+        dustParticles.push({x:worldX-6, y:groundY(worldX)+2, life:0.4, vx:-20-Math.random()*20});
       }
-    }
 
-    if (worldX >= TRACK_LENGTH){
-      worldX = TRACK_LENGTH;
-      phase = 'finish_cutscene';
-      cutsceneT = 0;
-      finalTime = elapsed;
-      setHold(false);
-      stopMusic();
+      if (!helperJoined && worldX >= HELPER_X){
+        phase = 'helper_cutscene';
+        cutsceneT = 0;
+        velocity = 0;
+      }
+
+      for (const o of obstacles){
+        if (!o.hit && Math.abs(worldX - o.x) < 13){
+          o.hit = true;
+          hitCount++;
+          velocity *= 0.45;
+          shakeT = 0.25;
+          playHit();
+          hudHits.textContent = 'ÜTKÖZÉS: ' + hitCount;
+        }
+      }
+
+      for (const z of zones){
+        if (!z.warned && worldX >= z.warnX && worldX < z.xStart){
+          z.warned = true;
+          showCaption(
+            z.type === 'jump' ? 'Gyorsulj neki az ugrásnak!' : 'Vigyázz, itt engedd el a gombot!',
+            2200
+          );
+        }
+
+        if (z.type === 'jump' && !z.resolved && worldX >= z.xStart){
+          z.resolved = true;
+          if (velocity < z.minSpeed){
+            worldX = z.xStart + 6;
+            velocity = 0;
+            stunT = JUMP_STUN;
+            stunKind = 'pit';
+            hitCount++;
+            audioEngineStop();
+            playHit();
+            shakeT = 0.3;
+            hudHits.textContent = 'ÜTKÖZÉS: ' + hitCount;
+            showCaption('Beleestetek a gödörbe!', 1400);
+          } else {
+            z.animT = 0.5;
+          }
+        }
+
+        if (z.type === 'tip' && !z.resolved){
+          if (worldX >= z.xStart && worldX <= z.xEnd){
+            if (isHolding){
+              z.holdTime += dt;
+              if (z.holdTime > z.tolerance){
+                z.resolved = true;
+                velocity = 0;
+                stunT = TIP_STUN;
+                stunKind = 'tip';
+                hitCount++;
+                audioEngineStop();
+                playHit();
+                shakeT = 0.35;
+                hudHits.textContent = 'ÜTKÖZÉS: ' + hitCount;
+                showCaption('Felborultatok!', 1400);
+              }
+            }
+          } else if (worldX < z.xStart) {
+            z.holdTime = 0;
+          }
+        }
+      }
+
+      for (const z of zones){ if (z.animT > 0) z.animT = Math.max(0, z.animT - dt); }
+
+      if (worldX >= TRACK_LENGTH){
+        worldX = TRACK_LENGTH;
+        phase = 'finish_cutscene';
+        cutsceneT = 0;
+        finalTime = elapsed;
+        setHold(false);
+        stopMusic();
+      }
     }
 
     hudTime.textContent = 'IDŐ: ' + elapsed.toFixed(1) + 's';
     progressBar.style.width = Math.min(100, worldX/TRACK_LENGTH*100) + '%';
+    speedBarFill.style.width = Math.min(100, velocity/MAX_SPEED*100) + '%';
+    const activeJump = zones.find(z => z.type==='jump' && z.warned && !z.resolved);
+    if (activeJump){
+      speedThreshold.style.opacity = '1';
+      speedThreshold.style.left = Math.min(100, activeJump.minSpeed/MAX_SPEED*100) + '%';
+    } else {
+      speedThreshold.style.opacity = '0';
+    }
   }
   else if (phase === 'helper_cutscene'){
     cutsceneT += dt;
@@ -554,180 +660,4 @@ function drawHillsLayer(offsetFactor, color, baseY, amp1, amp2){
 
 function drawGround(){
   const cx = camX();
-  ctx.fillStyle = '#4A3B32';
-  ctx.beginPath();
-  ctx.moveTo(0, H);
-  for (let sx=0; sx<=W; sx+=4){
-    const wx = sx + cx;
-    ctx.lineTo(sx, groundY(wx));
-  }
-  ctx.lineTo(W, H);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.fillStyle = '#C9A66B';
-  for (let sx=0; sx<=W; sx+=4){
-    const wx = sx + cx;
-    ctx.fillRect(sx, groundY(wx), 4, 2);
-  }
-  ctx.fillStyle = 'rgba(0,0,0,0.12)';
-  for (let sx=0; sx<=W; sx+=16){
-    const wx = sx + cx;
-    ctx.fillRect(sx, groundY(wx)+3, 6, 2);
-  }
-}
-
-function drawObstacle(o){
-  const sx = o.x - camX();
-  if (sx < -20 || sx > W+20) return;
-  const gy = groundY(o.x);
-  if (o.hit) ctx.globalAlpha = 0.35;
-  if (o.type === 'pothole'){
-    ctx.fillStyle = '#1C1610';
-    ctx.beginPath();
-    ctx.ellipse(sx, gy+2, 8, 3, 0, 0, Math.PI*2);
-    ctx.fill();
-  } else if (o.type === 'rock'){
-    ctx.fillStyle = '#6b6b6b';
-    ctx.fillRect(sx-5, gy-6, 10, 6);
-    ctx.fillStyle = '#8a8a8a';
-    ctx.fillRect(sx-5, gy-6, 10, 2);
-  } else {
-    ctx.fillStyle = '#EDE3D0';
-    ctx.fillRect(sx-6, gy-10, 10, 6);
-    ctx.fillRect(sx-8, gy-13, 5, 5);
-    ctx.fillStyle = '#1C1610';
-    ctx.fillRect(sx-6, gy-4, 2, 4);
-    ctx.fillRect(sx+2, gy-4, 2, 4);
-  }
-  ctx.globalAlpha = 1;
-}
-
-function drawPersonPush(sx, gy, phaseOffset, active){
-  const bob = active ? Math.sin((elapsed*10)+phaseOffset)*1.4 : 0;
-  ctx.fillStyle = '#3F6FA8';
-  ctx.fillRect(sx-2, gy-11+bob, 5, 7);
-  ctx.fillStyle = '#E8C9A0';
-  ctx.fillRect(sx-1, gy-14+bob, 3, 3);
-  ctx.fillStyle = '#1C1610';
-  ctx.fillRect(sx-3, gy-4, 2, 4);
-  ctx.fillRect(sx+1, gy-4, 2, 4);
-  ctx.fillStyle = '#E8C9A0';
-  ctx.fillRect(sx-6, gy-9+bob, 4, 2);
-}
-
-function drawCar(sx, gy, bodyColor, rustColor, tilt){
-  ctx.save();
-  ctx.translate(sx, gy);
-  ctx.rotate(tilt||0);
-  ctx.fillStyle = bodyColor;
-  ctx.fillRect(-16, -12, 32, 9);
-  ctx.fillRect(-10, -18, 20, 7);
-  ctx.fillStyle = rustColor;
-  ctx.fillRect(-16, -6, 6, 3);
-  ctx.fillRect(10, -6, 6, 3);
-  ctx.fillStyle = 'rgba(160,210,230,0.6)';
-  ctx.fillRect(-8, -17, 16, 5);
-  ctx.fillStyle = '#1C1610';
-  ctx.beginPath(); ctx.arc(-10, -2, 4, 0, Math.PI*2); ctx.fill();
-  ctx.beginPath(); ctx.arc(10, -2, 4, 0, Math.PI*2); ctx.fill();
-  ctx.fillStyle = '#555';
-  ctx.beginPath(); ctx.arc(-10, -2, 1.6, 0, Math.PI*2); ctx.fill();
-  ctx.beginPath(); ctx.arc(10, -2, 1.6, 0, Math.PI*2); ctx.fill();
-  ctx.restore();
-}
-
-function drawShop(){
-  const sx = TRACK_LENGTH - camX();
-  if (sx < -60 || sx > W+60) return;
-  const gy = groundY(TRACK_LENGTH);
-  ctx.fillStyle = '#3E5C4A';
-  ctx.fillRect(sx-2, gy-40, 46, 40);
-  ctx.fillStyle = '#547A5E';
-  ctx.fillRect(sx-2, gy-40, 46, 4);
-  ctx.fillStyle = '#1C1610';
-  ctx.fillRect(sx+4, gy-22, 20, 22);
-  ctx.fillStyle = '#E0A64B';
-  ctx.fillRect(sx-2, gy-48, 46, 8);
-  ctx.fillStyle = '#1C1610';
-  ctx.font = '5px monospace';
-  ctx.textAlign = 'center';
-  ctx.fillText('SZERVIZ', sx+21, gy-42);
-  ctx.fillStyle = 'rgba(255,255,255,0.15)';
-  ctx.fillRect(sx+30, gy-34, 10, 12);
-}
-
-function render(){
-  ctx.save();
-  if (shakeT > 0){
-    ctx.translate((Math.random()-0.5)*shakeT*10, (Math.random()-0.5)*shakeT*6);
-  }
-  drawSky();
-  drawHillsLayer(0.25, '#3E5C4A', H*0.6, 10, 4);
-  drawHillsLayer(0.5, '#547A5E', H*0.68, 14, 6);
-  drawGround();
-
-  for (const o of obstacles) drawObstacle(o);
-  drawShop();
-
-  const cx = camX();
-  const skodaWorldX = (phase === 'finish_cutscene' || phase === 'finished')
-    ? TRACK_LENGTH + Math.min(cutsceneT*14, 22)
-    : worldX;
-  const skodaSx = skodaWorldX - cx;
-  const skodaGy = groundY(Math.min(skodaWorldX, TRACK_LENGTH));
-
-  for (const p of dustParticles){
-    ctx.globalAlpha = Math.max(0,p.life*2);
-    ctx.fillStyle = '#cabf9e';
-    ctx.fillRect(p.x-cx, p.y, 2, 2);
-    ctx.globalAlpha = 1;
-  }
-
-  const tilt = phase==='playing' ? Math.sin(worldX*0.02)*0.02 : 0;
-
-  if (phase !== 'finish_cutscene' && phase !== 'finished'){
-    drawPersonPush(skodaSx-22, skodaGy, 0, isHolding);
-    if (helperJoined) drawPersonPush(skodaSx-28, skodaGy, 1.4, isHolding);
-  }
-
-  if (helperJoined && phase === 'playing'){
-    drawCar(skodaSx-40, skodaGy, '#E8E4DC', '#3F6FA8', 0);
-  }
-
-  drawCar(skodaSx, skodaGy, '#B0483A', '#7A5230', tilt);
-
-  if (phase === 'finish_cutscene'){
-    const t = Math.min(1, cutsceneT/1.6);
-    const corollaSx = skodaSx - 46;
-    drawCar(corollaSx, skodaGy, '#E8E4DC', '#3F6FA8', 0);
-    drawPersonPush(corollaSx + t*30 - 10, skodaGy, 0, true);
-    drawPersonPush(corollaSx + t*24 - 4, skodaGy, 1.2, true);
-  }
-  if (phase === 'finished'){
-    drawCar(skodaSx-46, skodaGy, '#E8E4DC', '#3F6FA8', 0);
-  }
-
-  ctx.restore();
-}
-
-function loop(now){
-  const dt = Math.min(0.05, (now - lastT)/1000);
-  lastT = now;
-  update(dt);
-  render();
-  requestAnimationFrame(loop);
-}
-requestAnimationFrame(loop);
-
-// ---------- Service worker ----------
-if ('serviceWorker' in navigator){
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js').catch(()=>{});
-  });
-}
-
-})();
-</script>
-</body>
-</html>
+  ctx
