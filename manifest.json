@@ -1,7 +1,7 @@
 {
   "name": "Skoda Roulette",
   "short_name": "Skoda Roulette",
-  "description": "Told a lerobbant Skodát a szerelőig, mielőtt lejár az idő!",
+  "description": "Told a lerobbant Skodát a szerelőig, mielőtt végleg megáll!",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
